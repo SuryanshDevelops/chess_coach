@@ -13,8 +13,117 @@ from storage import DATABASE_PATH
 st.set_page_config(
     page_title="Chess Coach",
     page_icon="♟",
-    layout="wide",
-)
+    layout="wide",)
+
+# ---------------- CUSTOM DESIGN ----------------
+
+st.markdown("""
+<style>
+
+/* Main application background */
+.stApp {
+    background-color: #F5F7F4;
+    color: #202820;
+}
+
+/* Main content spacing */
+.block-container {
+    max-width: 1250px;
+    padding-top: 2.5rem;
+    padding-bottom: 3rem;
+}
+
+/* Main headings */
+h1 {
+    color: #202820 !important;
+    font-weight: 700 !important;
+    letter-spacing: -1.2px;
+}
+
+h2, h3 {
+    color: #29382C !important;
+    font-weight: 650 !important;
+    letter-spacing: -0.4px;
+}
+
+/* Sidebar */
+[data-testid="stSidebar"] {
+    background-color: #FFFFFF;
+    border-right: 1px solid #E7EBE5;
+}
+
+/* Buttons */
+.stButton > button {
+    border-radius: 9px;
+    border: 1px solid #DCE4DA;
+    background-color: #FFFFFF;
+    color: #29382C;
+    font-weight: 600;
+    padding: 0.55rem 1rem;
+    transition: all 0.2s ease;
+}
+
+.stButton > button:hover {
+    border-color: #527A5A;
+    color: #527A5A;
+    background-color: #F3F7F2;
+}
+
+/* Primary buttons */
+.stButton > button[kind="primary"],
+.stFormSubmitButton > button {
+    background-color: #527A5A;
+    color: white;
+    border: 1px solid #527A5A;
+}
+
+.stButton > button[kind="primary"]:hover,
+.stFormSubmitButton > button:hover {
+    background-color: #416649;
+    color: white;
+}
+
+/* Input fields */
+.stTextInput input,
+.stNumberInput input,
+.stSelectbox div[data-baseweb="select"] {
+    border-radius: 8px;
+}
+
+/* Metric cards */
+[data-testid="stMetric"] {
+    background-color: #FFFFFF;
+    border: 1px solid #E7EBE5;
+    padding: 18px;
+    border-radius: 12px;
+}
+
+/* Expanders */
+[data-testid="stExpander"] {
+    background-color: #FFFFFF;
+    border: 1px solid #E7EBE5;
+    border-radius: 10px;
+}
+
+/* Horizontal separators */
+hr {
+    border-color: #E7EBE5;
+}
+
+/* Captions */
+.stCaption {
+    color: #788278;
+}
+
+/* Remove unnecessary top decoration */
+[data-testid="stDecoration"] {
+    display: none;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+# -----------------------------------------------
 
 FORMATS = {
     "Bullet": ["bullet"],
@@ -57,8 +166,9 @@ def load_games(username, formats, game_count):
         connection.close()
 
 
+
 def get_game_stats(game_data, username):
-    """Calculate results and ending types for saved games."""
+    """Calculate results and verify chess game endings."""
 
     stats = {
         "played": 0,
@@ -74,7 +184,9 @@ def get_game_stats(game_data, username):
     }
 
     for item in game_data:
-        game = chess.pgn.read_game(io.StringIO(item["pgn"]))
+        game = chess.pgn.read_game(
+            io.StringIO(item["pgn"])
+        )
 
         if game is None:
             continue
@@ -98,10 +210,15 @@ def get_game_stats(game_data, username):
 
         stats["played"] += 1
 
+        board = game.end().board()
+
+        is_checkmate = board.is_checkmate()
+        is_stalemate = board.is_stalemate()
+
         if result == "1/2-1/2":
             stats["draws"] += 1
 
-            if "stalemate" in termination:
+            if is_stalemate:
                 stats["stalemate_draws"] += 1
 
         elif (
@@ -113,17 +230,19 @@ def get_game_stats(game_data, username):
         else:
             stats["losses"] += 1
 
-            if "checkmate" in termination:
+            if is_checkmate:
                 stats["checkmate_losses"] += 1
+
             elif "time" in termination or "timeout" in termination:
                 stats["timeout_losses"] += 1
+
             elif "resign" in termination:
                 stats["resignation_losses"] += 1
+
             else:
                 stats["other_losses"] += 1
 
     return stats
-
 
 def show_stats(title, stats):
     """Display summary statistics for one format."""
@@ -158,24 +277,98 @@ def show_stats(title, stats):
         st.write(f"Unfinished games: {stats['unfinished']}")
 
 
-# Start on the setup page for a new session.
+# ---------------- SIDEBAR NAVIGATION ----------------
+
 if "page" not in st.session_state:
     st.session_state.page = "setup"
+
+if "menu" not in st.session_state:
+    st.session_state.menu = "Dashboard"
+
+if "username" not in st.session_state:
+    st.session_state.username = ""
+
+if "formats" not in st.session_state:
+    st.session_state.formats = []
+
+if "game_count" not in st.session_state:
+    st.session_state.game_count = 100
+
+if "analysis_type" not in st.session_state:
+    st.session_state.analysis_type = "Full analysis"
+
+if "opponent" not in st.session_state:
+    st.session_state.opponent = ""
+
+with st.sidebar:
+
+    st.markdown(
+        "<h2 style='margin-bottom:0;'>♟ Chess Coach</h2>",
+        unsafe_allow_html=True,
+    )
+
+    st.caption("Your personal chess workspace")
+    st.divider()
+
+    st.markdown("### Workspace")
+
+    pages = ["Dashboard", "My Games", "Settings"]
+
+    for page_name in pages:
+
+        is_active = st.session_state.menu == page_name
+
+        if st.button(
+            page_name,
+            key=f"nav_{page_name}",
+            use_container_width=True,
+            type="primary" if is_active else "secondary",
+        ):
+
+            st.session_state.menu = page_name
+
+            if page_name == "Dashboard":
+                st.session_state.page = (
+                    "analysis" if st.session_state.username else "setup"
+                )
+
+            elif page_name == "Settings":
+                st.session_state.page = "settings"
+
+            elif page_name == "My Games":
+                st.session_state.page = "my_games"
+
+            st.rerun()
+
+    st.divider()
+
+    st.caption("CHESS COACH")
+    st.caption("Personal game analytics")
 
 
 # ---------------- SETUP PAGE ----------------
 
 if st.session_state.page == "setup":
 
-    st.title("♟ Chess Coach")
-    st.write("Understand your games. Improve your decisions.")
+    st.markdown(
+        "<h1 style='font-size: 38px;'>Chess Coach</h1>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        "<p style='color: #788278; font-size: 16px;'>"
+        "Your games. Your patterns. Your improvement."
+        "</p>",
+        unsafe_allow_html=True,
+    )
+
+    st.divider()
 
     if DATABASE_PATH.exists():
         st.success("A saved game database was found.")
     else:
         st.info("No saved database yet. Fetch games to get started.")
 
-    # There is only ONE form on this page.
     with st.form("setup_form"):
 
         username = st.text_input(
@@ -220,7 +413,6 @@ if st.session_state.page == "setup":
             use_container_width=True,
         )
 
-    # Process the submission ONCE, outside the form.
     if submitted:
 
         if not username.strip():
@@ -234,6 +426,7 @@ if st.session_state.page == "setup":
 
         else:
             try:
+
                 selected_formats = FORMATS[game_format]
                 count = int(game_count)
 
@@ -254,7 +447,6 @@ if st.session_state.page == "setup":
                             count,
                         )
 
-                # Save the user's choices for the analysis page.
                 st.session_state.username = username.strip()
                 st.session_state.formats = selected_formats
                 st.session_state.game_count = count
@@ -271,14 +463,79 @@ if st.session_state.page == "setup":
                 st.error(f"Chess.com request failed: {error}")
 
 
+# ---------------- SETTINGS PAGE ----------------
+
+elif st.session_state.page == "settings":
+
+    st.title("Settings")
+    st.caption("Customize your Chess Coach experience.")
+
+    st.divider()
+
+    st.subheader("Appearance")
+
+    board_theme = st.selectbox(
+        "Chessboard colour",
+        [
+            "Classic Green",
+            "Blue",
+            "Brown",
+            "Purple",
+        ],
+    )
+
+    piece_style = st.selectbox(
+        "Chess piece style",
+        [
+            "Standard",
+            "Classic",
+        ],
+    )
+
+    st.divider()
+
+    st.subheader("Account")
+
+    settings_username = st.text_input(
+        "Username",
+        value=st.session_state.get("username", ""),
+    )
+
+    if st.button("Save settings", type="primary"):
+
+        st.session_state.board_theme = board_theme
+        st.session_state.piece_style = piece_style
+
+        st.success("Settings saved for this session.")
+
+
+# ---------------- MY GAMES PAGE ----------------
+
+elif st.session_state.page == "my_games":
+
+    st.title("My Games")
+    st.caption("Your saved Chess.com game library.")
+
+    st.info("Your game library will be built here next.")
+
+
 # ---------------- ANALYSIS PAGE ----------------
 
 elif st.session_state.page == "analysis":
 
-    st.title("Your Chess Analysis")
+    st.markdown(
+        "<h1 style='font-size: 34px;'>Performance Overview</h1>",
+        unsafe_allow_html=True,
+    )
+
+    st.caption("Review your games and understand your performance.")
+    st.divider()
 
     if st.button("← Back to setup"):
+
         st.session_state.page = "setup"
+        st.session_state.menu = "Dashboard"
+
         st.rerun()
 
     username = st.session_state.username
@@ -288,6 +545,7 @@ elif st.session_state.page == "analysis":
     games = load_games(username, formats, game_count)
 
     if not games:
+
         st.warning(
             "No saved games were found for these settings. "
             "Go back to setup and fetch games again."
@@ -295,10 +553,12 @@ elif st.session_state.page == "analysis":
 
     elif st.session_state.analysis_type == "Full analysis":
 
-       st.caption(
-    f"Analysing {len(games)} saved games for {username}.")
+        st.caption(
+            f"Analysing {len(games)} saved games for {username}."
+        )
 
-    for game_format in formats:
+        for game_format in formats:
+
             format_games = [
                 game
                 for game in games
@@ -310,61 +570,76 @@ elif st.session_state.page == "analysis":
                 show_stats(game_format.title(), stats)
 
     else:
-        opponent = st.session_state.opponent.lower()
-        matching_games = []
 
-        for item in games:
-            game = chess.pgn.read_game(io.StringIO(item["pgn"]))
+        opponent = st.session_state.opponent.strip().lower()
 
-            if game is None:
-                continue
+        if not opponent:
 
-            white = game.headers.get("White", "")
-            black = game.headers.get("Black", "")
-
-            if white.lower() == opponent or black.lower() == opponent:
-                matching_games.append((item, game))
-
-        if not matching_games:
-            st.warning(
-                "No games against this opponent were found among the "
-                "loaded games. Try fetching more recent games or "
-                "checking the username and format."
+            st.info(
+                "No opponent selected. Go back to setup "
+                "and enter an opponent's username if you want."
             )
 
         else:
-            st.success(
-                f"Found {len(matching_games)} matching game(s)."
-            )
 
-            selected_index = st.selectbox(
-                "Choose a game",
-                range(len(matching_games)),
-                format_func=lambda i: (
-                    f"{matching_games[i][1].headers.get('Date', '?')} | "
-                    f"{matching_games[i][1].headers.get('White', '?')} "
-                    f"vs "
-                    f"{matching_games[i][1].headers.get('Black', '?')}"
-                ),
-            )
+            matching_games = []
 
-            selected_item, selected_game = matching_games[selected_index]
+            for item in games:
 
-            st.write(
-                f"**Result:** "
-                f"{selected_game.headers.get('Result', 'Unknown')}"
-            )
+                game = chess.pgn.read_game(
+                    io.StringIO(item["pgn"])
+                )
 
-            st.write(
-                f"**Format:** {selected_item['time_class'].title()}"
-            )
+                if game is None:
+                    continue
 
-            st.write(
-                f"**Ending:** "
-                f"{selected_game.headers.get('Termination', 'Unknown')}"
-            )
+                white = game.headers.get("White", "")
+                black = game.headers.get("Black", "")
 
-            st.info(
-                "Game selection works. Detailed move-by-move analysis "
-                "will be added next."
-            )
+                if white.lower() == opponent or black.lower() == opponent:
+                    matching_games.append((item, game))
+
+            if not matching_games:
+
+                st.warning(
+                    f"No games against {opponent} were found "
+                    "among the loaded games."
+                )
+
+            else:
+
+                st.success(
+                    f"Found {len(matching_games)} matching game(s)."
+                )
+
+                selected_index = st.selectbox(
+                    "Choose a game",
+                    range(len(matching_games)),
+                    format_func=lambda i: (
+                        f"{matching_games[i][1].headers.get('Date', '?')} | "
+                        f"{matching_games[i][1].headers.get('White', '?')} "
+                        f"vs "
+                        f"{matching_games[i][1].headers.get('Black', '?')}"
+                    ),
+                )
+
+                selected_item, selected_game = matching_games[selected_index]
+
+                st.write(
+                    f"**Result:** "
+                    f"{selected_game.headers.get('Result', 'Unknown')}"
+                )
+
+                st.write(
+                    f"**Format:** {selected_item['time_class'].title()}"
+                )
+
+                st.write(
+                    f"**Ending:** "
+                    f"{selected_game.headers.get('Termination', 'Unknown')}"
+                )
+
+                st.info(
+                    "Game selection works. Detailed move-by-move "
+                    "analysis will be added next."
+                )
