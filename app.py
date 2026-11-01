@@ -1,13 +1,62 @@
-
 import sqlite3
 import io
-
+from datetime import date
 import chess.pgn
 import requests
 import streamlit as st
 
 from download_games import download_games
 from storage import DATABASE_PATH
+
+
+def load_default_username():
+    """Load the saved default Chess.com username."""
+
+    if not DATABASE_PATH.exists():
+        return ""
+
+    connection = sqlite3.connect(DATABASE_PATH)
+
+    try:
+        row = connection.execute(
+            "SELECT value FROM settings WHERE key = ?",
+            ("default_username",),
+        ).fetchone()
+
+        return row[0] if row else ""
+
+    except sqlite3.OperationalError:
+        return ""
+
+    finally:
+        connection.close()
+
+
+def save_default_username(username):
+    """Permanently save the default Chess.com username."""
+
+    connection = sqlite3.connect(DATABASE_PATH)
+
+    try:
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO settings (key, value)
+            VALUES (?, ?)
+            """,
+            ("default_username", username.strip()),
+        )
+
+        connection.commit()
+
+    finally:
+        connection.close()
 
 
 st.set_page_config(
@@ -123,7 +172,6 @@ hr {
 </style>
 """, unsafe_allow_html=True)
 
-# -----------------------------------------------
 
 FORMATS = {
     "Bullet": ["bullet"],
@@ -133,33 +181,74 @@ FORMATS = {
 }
 
 
-def load_games(username, formats, game_count):
-    """Load the most recent saved games for this user."""
+
+from datetime import datetime, timedelta, timezone
+
+
+def load_games(
+    username,
+    formats,
+    game_count=5000,
+    start_date=None,
+    end_date=None,
+):
+    """Load saved games with optional date filters."""
+
+    if not username.strip() or not formats:
+        return []
 
     if not DATABASE_PATH.exists():
         return []
 
     placeholders = ",".join("?" for _ in formats)
+
+    query = f"""
+        SELECT url, time_class, end_time, pgn
+        FROM games
+        WHERE lower(username) = lower(?)
+          AND time_class IN ({placeholders})
+    """
+
+    parameters = [username.strip(), *formats]
+
+    if start_date is not None:
+
+        start_timestamp = datetime.combine(
+            start_date,
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        ).timestamp()
+
+        query += " AND end_time >= ?"
+        parameters.append(start_timestamp)
+
+    if end_date is not None:
+
+        end_timestamp = datetime.combine(
+            end_date + timedelta(days=1),
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        ).timestamp()
+
+        query += " AND end_time < ?"
+        parameters.append(end_timestamp)
+
+    query += " ORDER BY end_time DESC LIMIT ?"
+    parameters.append(game_count)
+
     connection = sqlite3.connect(DATABASE_PATH)
     connection.row_factory = sqlite3.Row
 
     try:
+
         rows = connection.execute(
-            f"""
-            SELECT url, time_class, end_time, pgn
-            FROM games
-            WHERE lower(username) = lower(?)
-              AND time_class IN ({placeholders})
-            ORDER BY end_time DESC
-            LIMIT ?
-            """,
-            [username.strip(), *formats, game_count],
+            query,
+            parameters,
         ).fetchall()
 
         return [dict(row) for row in rows]
 
     except sqlite3.OperationalError:
-        # The database exists but its games table may not yet exist.
         return []
 
     finally:
@@ -167,23 +256,33 @@ def load_games(username, formats, game_count):
 
 
 
+
 def get_game_stats(game_data, username):
-    """Calculate results and verify chess game endings."""
+    """Calculate results and classify chess game endings."""
 
     stats = {
         "played": 0,
         "wins": 0,
         "losses": 0,
         "draws": 0,
-        "unfinished": 0,
+
+        # Loss categories
         "checkmate_losses": 0,
         "timeout_losses": 0,
         "resignation_losses": 0,
-        "other_losses": 0,
+
+        # Draw categories
         "stalemate_draws": 0,
+        "repetition_draws": 0,
+        "fifty_move_draws": 0,
+        "insufficient_material_draws": 0,
+        "agreement_draws": 0,
+
+        "unfinished": 0,
     }
 
     for item in game_data:
+
         game = chess.pgn.read_game(
             io.StringIO(item["pgn"])
         )
@@ -192,6 +291,7 @@ def get_game_stats(game_data, username):
             continue
 
         headers = game.headers
+
         white = headers.get("White", "")
         black = headers.get("Black", "")
         result = headers.get("Result", "*")
@@ -199,8 +299,10 @@ def get_game_stats(game_data, username):
 
         if username.lower() == white.lower():
             user_is_white = True
+
         elif username.lower() == black.lower():
             user_is_white = False
+
         else:
             continue
 
@@ -212,25 +314,25 @@ def get_game_stats(game_data, username):
 
         board = game.end().board()
 
-        is_checkmate = board.is_checkmate()
-        is_stalemate = board.is_stalemate()
+        # ---------------- WINS ----------------
 
-        if result == "1/2-1/2":
-            stats["draws"] += 1
-
-            if is_stalemate:
-                stats["stalemate_draws"] += 1
-
-        elif (
+        if (
             (result == "1-0" and user_is_white)
             or (result == "0-1" and not user_is_white)
         ):
+
             stats["wins"] += 1
 
-        else:
+        # ---------------- LOSSES ----------------
+
+        elif (
+            (result == "0-1" and user_is_white)
+            or (result == "1-0" and not user_is_white)
+        ):
+
             stats["losses"] += 1
 
-            if is_checkmate:
+            if board.is_checkmate():
                 stats["checkmate_losses"] += 1
 
             elif "time" in termination or "timeout" in termination:
@@ -239,13 +341,50 @@ def get_game_stats(game_data, username):
             elif "resign" in termination:
                 stats["resignation_losses"] += 1
 
-            else:
-                stats["other_losses"] += 1
+            
+
+        # ---------------- DRAWS ----------------
+
+        elif result == "1/2-1/2":
+
+            stats["draws"] += 1
+
+            # Prefer explicit termination information when available.
+            if "stalemate" in termination:
+                stats["stalemate_draws"] += 1
+
+            elif "repetition" in termination:
+                stats["repetition_draws"] += 1
+
+            elif "50" in termination or "fifty" in termination:
+                stats["fifty_move_draws"] += 1
+
+            elif "insufficient" in termination:
+                stats["insufficient_material_draws"] += 1
+
+            elif "agreement" in termination:
+                stats["agreement_draws"] += 1
+
+            # Otherwise inspect the final board and move history.
+            elif board.is_stalemate():
+                stats["stalemate_draws"] += 1
+
+            elif board.is_repetition(3):
+                stats["repetition_draws"] += 1
+
+            elif board.is_fifty_moves():
+                stats["fifty_move_draws"] += 1
+
+            elif board.is_insufficient_material():
+                stats["insufficient_material_draws"] += 1
+
+            
 
     return stats
 
+
 def show_stats(title, stats):
-    """Display summary statistics for one format."""
+    """Display summary statistics and game-ending breakdown."""
 
     st.subheader(title)
 
@@ -269,12 +408,25 @@ def show_stats(title, stats):
     )
 
     with st.expander("How did your games end?"):
-        st.write(f"Checkmate losses: {stats['checkmate_losses']}")
-        st.write(f"Timeout losses: {stats['timeout_losses']}")
-        st.write(f"Resignation losses: {stats['resignation_losses']}")
-        st.write(f"Other or unknown loss endings: {stats['other_losses']}")
-        st.write(f"Stalemate draws: {stats['stalemate_draws']}")
-        st.write(f"Unfinished games: {stats['unfinished']}")
+
+        st.markdown("**Loss breakdown**")
+
+        st.write(f"Checkmate: {stats['checkmate_losses']}")
+        st.write(f"Timeout: {stats['timeout_losses']}")
+        st.write(f"Resignation: {stats['resignation_losses']}")
+
+        st.divider()
+
+        st.markdown("**Draw breakdown**")
+
+        st.write(f"Stalemate: {stats['stalemate_draws']}")
+        st.write(f"Threefold repetition: {stats['repetition_draws']}")
+        st.write(f"50-move rule: {stats['fifty_move_draws']}")
+        st.write(
+            f"Insufficient material: "
+            f"{stats['insufficient_material_draws']}"
+        )
+        st.write(f"Draw by agreement: {stats['agreement_draws']}")
 
 
 # ---------------- SIDEBAR NAVIGATION ----------------
@@ -287,6 +439,8 @@ if "menu" not in st.session_state:
 
 if "username" not in st.session_state:
     st.session_state.username = ""
+if "default_username" not in st.session_state:
+    st.session_state.default_username = load_default_username()
 
 if "formats" not in st.session_state:
     st.session_state.formats = []
@@ -312,7 +466,7 @@ with st.sidebar:
 
     st.markdown("### Workspace")
 
-    pages = ["Dashboard", "My Games", "Settings"]
+    pages = ["Dashboard", "My Games", "Statistics", "Settings"]
 
     for page_name in pages:
 
@@ -328,17 +482,19 @@ with st.sidebar:
             st.session_state.menu = page_name
 
             if page_name == "Dashboard":
-                st.session_state.page = (
-                    "analysis" if st.session_state.username else "setup"
-                )
-
-            elif page_name == "Settings":
-                st.session_state.page = "settings"
+                st.session_state.page = "setup"
 
             elif page_name == "My Games":
                 st.session_state.page = "my_games"
 
+            elif page_name == "Statistics":
+                st.session_state.page = "statistics"
+
+            elif page_name == "Settings":
+                st.session_state.page = "settings"
+
             st.rerun()
+
 
     st.divider()
 
@@ -346,34 +502,39 @@ with st.sidebar:
     st.caption("Personal game analytics")
 
 
-# ---------------- SETUP PAGE ----------------
+
+
+# ---------------- DASHBOARD: DOWNLOAD GAMES ----------------
 
 if st.session_state.page == "setup":
 
     st.markdown(
-        "<h1 style='font-size: 38px;'>Chess Coach</h1>",
+        "<h1 style='font-size: 38px;'>Game Downloader</h1>",
         unsafe_allow_html=True,
     )
 
     st.markdown(
         "<p style='color: #788278; font-size: 16px;'>"
-        "Your games. Your patterns. Your improvement."
+        "Download and save your Chess.com games."
         "</p>",
         unsafe_allow_html=True,
     )
 
     st.divider()
 
-    if DATABASE_PATH.exists():
-        st.success("A saved game database was found.")
-    else:
-        st.info("No saved database yet. Fetch games to get started.")
+    # Choose how games should be downloaded.
+    download_mode = st.selectbox(
+        "Download method",
+        ["Recent games", "Date range"],
+        key="download_mode",
+    )
 
-    with st.form("setup_form"):
+    with st.form("download_form"):
 
         username = st.text_input(
             "Chess.com username",
-            placeholder="Enter your username",
+            value=st.session_state.default_username,
+            placeholder="Enter Chess.com username",
         )
 
         game_format = st.selectbox(
@@ -381,34 +542,43 @@ if st.session_state.page == "setup":
             list(FORMATS.keys()),
         )
 
-        game_count = st.number_input(
-            "Number of games to analyse",
-            min_value=1,
-            max_value=5000,
-            value=100,
-            step=10,
-        )
+        # Recent games mode.
+        if download_mode == "Recent games":
 
-        analysis_type = st.radio(
-            "What would you like to analyse?",
-            ["Full analysis", "A particular game"],
-        )
-
-        opponent = ""
-
-        if analysis_type == "A particular game":
-            opponent = st.text_input(
-                "Opponent's Chess.com username",
-                placeholder="Enter opponent username",
+            game_count = st.number_input(
+                "Number of recent games to fetch",
+                min_value=1,
+                max_value=5000,
+                value=100,
+                step=10,
             )
 
-        use_saved_games = st.checkbox(
-            "Use saved games if available; fetch if none match",
-            value=True,
-        )
+        # Historical date-range mode.
+        else:
+
+            st.caption(
+                "Select the period for which you want to download games. "
+                "Dates are interpreted in UTC."
+            )
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                start_date = st.date_input(
+                    "Start date",
+                    value=date(2025, 1, 1),
+                    max_value=date.today(),
+                )
+
+            with col2:
+                end_date = st.date_input(
+                    "End date",
+                    value=date.today(),
+                    max_value=date.today(),
+                )
 
         submitted = st.form_submit_button(
-            "Continue to analysis",
+            "Download games",
             type="primary",
             use_container_width=True,
         )
@@ -416,50 +586,63 @@ if st.session_state.page == "setup":
     if submitted:
 
         if not username.strip():
-            st.error("Enter your Chess.com username.")
 
-        elif (
-            analysis_type == "A particular game"
-            and not opponent.strip()
-        ):
-            st.error("Enter the opponent's username.")
+            st.error("Enter a Chess.com username.")
 
         else:
+
             try:
 
                 selected_formats = FORMATS[game_format]
-                count = int(game_count)
 
-                cached_games = []
+                with st.spinner("Fetching games from Chess.com..."):
 
-                if use_saved_games:
-                    cached_games = load_games(
-                        username,
-                        selected_formats,
-                        count,
-                    )
+                    if download_mode == "Recent games":
 
-                if not cached_games:
-                    with st.spinner("Fetching games from Chess.com..."):
-                        download_games(
-                            username,
+                        count = int(game_count)
+
+                        database_path, fetched_count = download_games(
+                            username.strip(),
                             selected_formats,
                             count,
                         )
 
+                    else:
+
+                        if start_date > end_date:
+                            st.error(
+                                "Start date cannot be after end date."
+                            )
+                            st.stop()
+
+                        database_path, fetched_count = download_games(
+                            username.strip(),
+                            selected_formats,
+                            start_date=start_date,
+                            end_date=end_date,
+                        )
+
                 st.session_state.username = username.strip()
                 st.session_state.formats = selected_formats
-                st.session_state.game_count = count
-                st.session_state.analysis_type = analysis_type
-                st.session_state.opponent = opponent.strip()
-                st.session_state.page = "analysis"
 
-                st.rerun()
+                if download_mode == "Recent games":
+                    st.session_state.game_count = count
+
+                st.success(
+                    f"Successfully fetched {fetched_count} games "
+                    f"for {username.strip()}."
+                )
+
+                st.caption(
+                    "Your games have been saved in the local database."
+                )
 
             except ValueError as error:
+
                 st.error(str(error))
 
             except requests.RequestException as error:
+
                 st.error(f"Chess.com request failed: {error}")
 
 
@@ -497,16 +680,29 @@ elif st.session_state.page == "settings":
     st.subheader("Account")
 
     settings_username = st.text_input(
-        "Username",
-        value=st.session_state.get("username", ""),
+        "Default Chess.com username",
+        value=st.session_state.default_username,
+        placeholder="Enter your Chess.com username",
     )
 
     if st.button("Save settings", type="primary"):
 
-        st.session_state.board_theme = board_theme
-        st.session_state.piece_style = piece_style
+        if not settings_username.strip():
 
-        st.success("Settings saved for this session.")
+            st.error("Please enter a Chess.com username.")
+
+        else:
+
+            save_default_username(settings_username)
+
+            st.session_state.default_username = settings_username.strip()
+
+            st.session_state.board_theme = board_theme
+            st.session_state.piece_style = piece_style
+
+            st.success("Settings saved successfully.")
+
+
 
 
 # ---------------- MY GAMES PAGE ----------------
@@ -514,76 +710,160 @@ elif st.session_state.page == "settings":
 elif st.session_state.page == "my_games":
 
     st.title("My Games")
-    st.caption("Your saved Chess.com game library.")
 
-    st.info("Your game library will be built here next.")
+    # Initialize page state.
+    if "my_games_show_results" not in st.session_state:
+        st.session_state.my_games_show_results = False
 
+    # ---------------- FILTER SCREEN ----------------
 
-# ---------------- ANALYSIS PAGE ----------------
+    if not st.session_state.my_games_show_results:
 
-elif st.session_state.page == "analysis":
+        st.caption("Choose your filters to browse saved games.")
 
-    st.markdown(
-        "<h1 style='font-size: 34px;'>Performance Overview</h1>",
-        unsafe_allow_html=True,
-    )
+        st.divider()
 
-    st.caption("Review your games and understand your performance.")
-    st.divider()
+        with st.form("my_games_filter_form"):
 
-    if st.button("← Back to setup"):
+            username = st.text_input(
+                "Chess.com username",
+                value=(
+                    st.session_state.username
+                    or st.session_state.default_username
+                ),
+                placeholder="Enter any Chess.com username",
+            )
 
-        st.session_state.page = "setup"
-        st.session_state.menu = "Dashboard"
+            st.subheader("Filters")
 
-        st.rerun()
+            col1, col2 = st.columns(2)
 
-    username = st.session_state.username
-    formats = st.session_state.formats
-    game_count = st.session_state.game_count
+            with col1:
+                selected_format = st.selectbox(
+                    "Game format",
+                    ["All", "Bullet", "Blitz", "Rapid", "Daily"],
+                )
 
-    games = load_games(username, formats, game_count)
+            with col2:
+                selected_result = st.selectbox(
+                    "Result",
+                    ["All", "Win", "Loss", "Draw", "Unfinished"],
+                )
 
-    if not games:
+            opponent_search = st.text_input(
+                "Opponent",
+                placeholder="Search opponent username...",
+            )
 
-        st.warning(
-            "No saved games were found for these settings. "
-            "Go back to setup and fetch games again."
-        )
+            use_date_filter = st.checkbox("Filter by date")
 
-    elif st.session_state.analysis_type == "Full analysis":
+            start_date = None
+            end_date = None
 
-        st.caption(
-            f"Analysing {len(games)} saved games for {username}."
-        )
+            if use_date_filter:
 
-        for game_format in formats:
+                col1, col2 = st.columns(2)
 
-            format_games = [
-                game
-                for game in games
-                if game["time_class"] == game_format
-            ]
+                with col1:
+                    start_date = st.date_input(
+                        "Start date",
+                        value=date(2025, 1, 1),
+                        max_value=date.today(),
+                    )
 
-            if format_games:
-                stats = get_game_stats(format_games, username)
-                show_stats(game_format.title(), stats)
+                with col2:
+                    end_date = st.date_input(
+                        "End date",
+                        value=date.today(),
+                        max_value=date.today(),
+                    )
+
+            game_count = st.number_input(
+                "Maximum games to display",
+                min_value=1,
+                max_value=5000,
+                value=100,
+                step=10,
+            )
+
+            submitted = st.form_submit_button(
+                "Show Games",
+                type="primary",
+                use_container_width=True,
+            )
+
+        if submitted:
+
+            if not username.strip():
+
+                st.error("Enter a Chess.com username.")
+
+            elif (
+                use_date_filter
+                and start_date > end_date
+            ):
+
+                st.error("Start date cannot be after end date.")
+
+            else:
+
+                # Save selected filters.
+                st.session_state.my_games_filters = {
+                    "username": username.strip(),
+                    "format": selected_format,
+                    "result": selected_result,
+                    "opponent": opponent_search.strip(),
+                    "start_date": start_date if use_date_filter else None,
+                    "end_date": end_date if use_date_filter else None,
+                    "game_count": int(game_count),
+                }
+
+                st.session_state.my_games_show_results = True
+                st.rerun()
+
+    # ---------------- RESULTS SCREEN ----------------
 
     else:
 
-        opponent = st.session_state.opponent.strip().lower()
+        filters = st.session_state.my_games_filters
 
-        if not opponent:
+        username = filters["username"]
 
-            st.info(
-                "No opponent selected. Go back to setup "
-                "and enter an opponent's username if you want."
+        st.caption(f"Saved games for {username}")
+
+        if st.button("← Back to Filters"):
+            st.session_state.my_games_show_results = False
+            st.rerun()
+
+        st.divider()
+
+        # Determine formats.
+        if filters["format"] == "All":
+            formats = ["bullet", "blitz", "rapid", "daily"]
+        else:
+            formats = [filters["format"].lower()]
+
+        # Load saved games.
+        games = load_games(
+            username,
+            formats,
+            5000,
+            start_date=filters["start_date"],
+            end_date=filters["end_date"],
+        )
+
+        if not games:
+
+            st.warning(
+                "No saved games found for this selection. "
+                "Download games from Dashboard first."
             )
 
         else:
 
-            matching_games = []
+            filtered_games = []
 
+            # Process PGN files.
             for item in games:
 
                 game = chess.pgn.read_game(
@@ -593,53 +873,309 @@ elif st.session_state.page == "analysis":
                 if game is None:
                     continue
 
-                white = game.headers.get("White", "")
-                black = game.headers.get("Black", "")
+                white = game.headers.get("White", "Unknown")
+                black = game.headers.get("Black", "Unknown")
+                result = game.headers.get("Result", "*")
 
-                if white.lower() == opponent or black.lower() == opponent:
-                    matching_games.append((item, game))
+                if white.lower() == username.lower():
 
-            if not matching_games:
+                    opponent = black
 
-                st.warning(
-                    f"No games against {opponent} were found "
-                    "among the loaded games."
-                )
+                    if result == "1-0":
+                        outcome = "Win"
+                    elif result == "0-1":
+                        outcome = "Loss"
+                    elif result == "1/2-1/2":
+                        outcome = "Draw"
+                    else:
+                        outcome = "Unfinished"
+
+                elif black.lower() == username.lower():
+
+                    opponent = white
+
+                    if result == "0-1":
+                        outcome = "Win"
+                    elif result == "1-0":
+                        outcome = "Loss"
+                    elif result == "1/2-1/2":
+                        outcome = "Draw"
+                    else:
+                        outcome = "Unfinished"
+
+                else:
+                    continue
+
+                # Apply result filter.
+                if (
+                    filters["result"] != "All"
+                    and outcome != filters["result"]
+                ):
+                    continue
+
+                # Apply opponent filter.
+                if (
+                    filters["opponent"].lower()
+                    not in opponent.lower()
+                ):
+                    continue
+
+                filtered_games.append({
+                    "opponent": opponent,
+                    "outcome": outcome,
+                    "format": item["time_class"].title(),
+                    "date": game.headers.get("Date", "Unknown"),
+                    "url": item["url"],
+                })
+
+            # ---------------- DISPLAY RESULTS ----------------
+
+            displayed_games = filtered_games[:filters["game_count"]]
+
+            st.subheader("Game Results")
+
+            st.caption(
+                f"{len(filtered_games)} matching games found. "
+                f"Showing {len(displayed_games)}."
+            )
+
+            if not displayed_games:
+
+                st.info("No games match your selected filters.")
 
             else:
 
-                st.success(
-                    f"Found {len(matching_games)} matching game(s)."
-                )
+                for game in displayed_games:
 
-                selected_index = st.selectbox(
-                    "Choose a game",
-                    range(len(matching_games)),
-                    format_func=lambda i: (
-                        f"{matching_games[i][1].headers.get('Date', '?')} | "
-                        f"{matching_games[i][1].headers.get('White', '?')} "
-                        f"vs "
-                        f"{matching_games[i][1].headers.get('Black', '?')}"
-                    ),
-                )
+                    game_date = game["date"].replace(".", "-")
 
-                selected_item, selected_game = matching_games[selected_index]
+                    with st.container(border=True):
 
-                st.write(
-                    f"**Result:** "
-                    f"{selected_game.headers.get('Result', 'Unknown')}"
-                )
+                        col1, col2, col3 = st.columns([2, 1, 1])
 
-                st.write(
-                    f"**Format:** {selected_item['time_class'].title()}"
-                )
+                        with col1:
+                            st.markdown(f"**vs {game['opponent']}**")
+                            st.caption(game_date)
 
-                st.write(
-                    f"**Ending:** "
-                    f"{selected_game.headers.get('Termination', 'Unknown')}"
-                )
+                        with col2:
+                            st.write(game["format"])
 
-                st.info(
-                    "Game selection works. Detailed move-by-move "
-                    "analysis will be added next."
-                )
+                        with col3:
+                            st.markdown(f"**{game['outcome']}**")
+
+
+
+# ---------------- STATISTICS PAGE ----------------
+
+elif st.session_state.page == "statistics":
+
+    st.title("Statistics")
+    st.caption("Analyse your saved Chess.com games.")
+
+    # Initialize results-screen state.
+    if "statistics_show_results" not in st.session_state:
+        st.session_state.statistics_show_results = False
+
+    # ---------------- ANALYSIS SETUP SCREEN ----------------
+
+    if not st.session_state.statistics_show_results:
+
+        st.divider()
+
+        st.caption("Choose which saved games you want to analyse.")
+
+        # Outside the form so changing this immediately updates the UI.
+        date_mode = st.selectbox(
+            "Date selection",
+            ["All saved dates", "Custom date range"],
+            key="statistics_date_mode",
+        )
+
+        with st.form("statistics_filter_form"):
+
+            username = st.text_input(
+                "Chess.com username",
+                value=(
+                    st.session_state.username
+                    or st.session_state.default_username
+                ),
+                placeholder="Enter Chess.com username",
+            )
+
+            selected_format = st.selectbox(
+                "Game format",
+                ["All formats", "Bullet", "Blitz", "Rapid", "Daily"],
+            )
+
+            start_date = None
+            end_date = None
+
+            if date_mode == "Custom date range":
+
+                st.caption("Dates are interpreted in UTC.")
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    start_date = st.date_input(
+                        "Start date",
+                        value=date(2025, 1, 1),
+                        max_value=date.today(),
+                    )
+
+                with col2:
+                    end_date = st.date_input(
+                        "End date",
+                        value=date.today(),
+                        max_value=date.today(),
+                    )
+
+            submitted = st.form_submit_button(
+                "Analyse Games",
+                type="primary",
+                use_container_width=True,
+            )
+
+        if submitted:
+
+            if not username.strip():
+
+                st.error("Enter a Chess.com username.")
+
+            elif (
+                date_mode == "Custom date range"
+                and start_date > end_date
+            ):
+
+                st.error("Start date cannot be after end date.")
+
+            else:
+
+                if selected_format == "All formats":
+                    selected_formats = [
+                        "bullet",
+                        "blitz",
+                        "rapid",
+                        "daily",
+                    ]
+                else:
+                    selected_formats = [
+                        selected_format.lower()
+                    ]
+
+                # Save analysis settings.
+                st.session_state.statistics_filters = {
+                    "username": username.strip(),
+                    "formats": selected_formats,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                }
+
+                st.session_state.statistics_show_results = True
+                st.rerun()
+
+    # ---------------- ANALYSIS RESULTS SCREEN ----------------
+
+    else:
+
+        filters = st.session_state.statistics_filters
+
+        username = filters["username"]
+        formats = filters["formats"]
+
+        if st.button("← Back to Analysis Setup"):
+            st.session_state.statistics_show_results = False
+            st.rerun()
+
+        st.divider()
+
+        st.subheader(f"Analysis for {username}")
+
+        
+        # ---------------- LOAD SAVED GAMES ----------------
+
+        all_formats = [
+            "bullet",
+            "blitz",
+            "rapid",
+            "daily",
+        ]
+
+        with st.spinner("Analysing your saved games..."):
+
+            # Load ALL formats for overall performance.
+            all_games = load_games(
+                username,
+                all_formats,
+                5000,
+                start_date=filters["start_date"],
+                end_date=filters["end_date"],
+            )
+
+            # Load only selected formats for the format breakdown.
+            selected_games = load_games(
+                username,
+                formats,
+                5000,
+                start_date=filters["start_date"],
+                end_date=filters["end_date"],
+            )
+
+        if not all_games:
+
+            st.warning(
+                "No saved games found for this username and period. "
+                "Download games from Dashboard first."
+            )
+
+        else:
+
+            # ---------------- OVERALL PERFORMANCE ----------------
+
+            st.caption(
+                f"Analysing {len(all_games)} saved games across all formats."
+            )
+
+            overall_stats = get_game_stats(
+                all_games,
+                username,
+            )
+
+            st.divider()
+
+            show_stats(
+                "Overall Performance (All Formats)",
+                overall_stats,
+            )
+
+            # ---------------- FORMAT BREAKDOWN ----------------
+
+            st.divider()
+
+            st.subheader("Performance by Format")
+
+            if not selected_games:
+
+                st.info("No games found for the selected format.")
+
+            else:
+
+                for game_format in formats:
+
+                    format_games = [
+                        item for item in selected_games
+                        if item["time_class"] == game_format
+                    ]
+
+                    if not format_games:
+                        continue
+
+                    format_stats = get_game_stats(
+                        format_games,
+                        username,
+                    )
+
+                    show_stats(
+                        game_format.title(),
+                        format_stats,
+                    )

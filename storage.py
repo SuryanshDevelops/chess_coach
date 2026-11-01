@@ -11,15 +11,12 @@ def save_games(games, username):
     connection = sqlite3.connect(DATABASE_PATH)
 
     try:
-        connection.execute("""
-            CREATE TABLE IF NOT EXISTS games (
+        connection.execute("""CREATE TABLE IF NOT EXISTS games (
                 url TEXT PRIMARY KEY,
                 username TEXT NOT NULL,
                 time_class TEXT NOT NULL,
                 end_time INTEGER NOT NULL,
-                pgn TEXT NOT NULL
-            )
-        """)
+                pgn TEXT NOT NULL )""")
 
         new_games = 0
 
