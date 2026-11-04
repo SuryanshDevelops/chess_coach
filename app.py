@@ -1,3 +1,4 @@
+import chess.svg
 import sqlite3
 import io
 from datetime import date
@@ -714,7 +715,8 @@ elif st.session_state.page == "my_games":
     # Initialize page state.
     if "my_games_show_results" not in st.session_state:
         st.session_state.my_games_show_results = False
-
+    if "selected_game" not in st.session_state:
+        st.session_state.selected_game = None
     # ---------------- FILTER SCREEN ----------------
 
     if not st.session_state.my_games_show_results:
@@ -832,9 +834,9 @@ elif st.session_state.page == "my_games":
         st.caption(f"Saved games for {username}")
 
         if st.button("← Back to Filters"):
-            st.session_state.my_games_show_results = False
-            st.rerun()
-
+             st.session_state.my_games_show_results = False
+             st.session_state.selected_game = None
+             st.rerun()
         st.divider()
 
         # Determine formats.
@@ -926,44 +928,209 @@ elif st.session_state.page == "my_games":
                     "format": item["time_class"].title(),
                     "date": game.headers.get("Date", "Unknown"),
                     "url": item["url"],
-                })
+                    "pgn": item["pgn"],
+                    "white": white,
+                    "black": black,
+                    "result": result,})
 
             # ---------------- DISPLAY RESULTS ----------------
 
             displayed_games = filtered_games[:filters["game_count"]]
+           
+            
+            # ---------------- INDIVIDUAL GAME REVIEW ----------------
 
-            st.subheader("Game Results")
+            if st.session_state.selected_game is not None:
 
-            st.caption(
-                f"{len(filtered_games)} matching games found. "
-                f"Showing {len(displayed_games)}."
-            )
+                selected_game = st.session_state.selected_game
 
-            if not displayed_games:
+                if st.button("← Back to Games"):
+                    st.session_state.selected_game = None
+                    st.rerun()
 
-                st.info("No games match your selected filters.")
+                st.divider()
+                st.title("Game Review")
+
+                st.subheader(
+                    f"{selected_game['white']} vs {selected_game['black']}"
+                )
+
+                col1, col2, col3 = st.columns(3)
+
+                col1.metric("Result", selected_game["result"])
+                col2.metric("Format", selected_game["format"])
+                col3.metric("Date", selected_game["date"])
+
+                st.divider()
+
+                # Parse the selected game's PGN.
+                review_game = chess.pgn.read_game(
+                    io.StringIO(selected_game["pgn"])
+                )
+
+                if review_game is not None:
+
+                    st.subheader("Game Board")
+
+                    # Reset navigation when a different game is selected.
+                    if st.session_state.get("review_game_url") != selected_game["url"]:
+                        st.session_state.review_game_url = selected_game["url"]
+                        st.session_state.review_move_index = 0
+
+                    # Reconstruct every position in the game.
+                    board = review_game.board()
+                    positions = [board.copy()]
+                    move_records = []
+
+                    for move in review_game.mainline_moves():
+
+                        move_number = board.fullmove_number
+                        san_move = board.san(move)
+
+                        if board.turn == chess.WHITE:
+                            move_label = f"{move_number}. {san_move}"
+                        else:
+                            move_label = f"{move_number}... {san_move}"
+
+                        board.push(move)
+
+                        move_records.append({
+                            "label": move_label,
+                            "move": move,
+                        })
+
+                        positions.append(board.copy())
+
+                    # Keep the selected index within the game's move range.
+                    move_index = st.session_state.review_move_index
+                    move_index = min(move_index, len(move_records))
+                    move_index = max(move_index, 0)
+
+                    st.session_state.review_move_index = move_index
+
+                    # Get the position currently being viewed.
+                    current_board = positions[move_index]
+
+                    last_move = (
+                        move_records[move_index - 1]["move"]
+                        if move_index > 0
+                        else None
+                    )
+
+                    # Display the chessboard.
+                    board_svg = chess.svg.board(
+                        board=current_board,
+                        lastmove=last_move,
+                        size=650,
+                        coordinates=True,
+                    )
+
+                    st.html(
+                         f"""
+                         <div style="
+                        width: 100%;
+                        max-width: 680px;
+                        margin: auto;
+                         "> {board_svg} </div>""")
+                    # Show the current position's move.
+                    if move_index == 0:
+                        st.info("Starting Position")
+                    else:
+                        st.markdown(
+                            f"**Current move:** "
+                            f"{move_records[move_index - 1]['label']}"
+                        )
+
+                    st.caption(
+                        f"Position {move_index} of {len(move_records)} moves"
+                    )
+
+                    # Navigation controls.
+                    col1, col2, col3, col4 = st.columns(4)
+
+                    with col1:
+                        if st.button(
+                            "⏮ First",
+                            disabled=move_index == 0,
+                            use_container_width=True,
+                        ):
+                            st.session_state.review_move_index = 0
+                            st.rerun()
+
+                    with col2:
+                        if st.button(
+                            "← Previous",
+                            disabled=move_index == 0,
+                            use_container_width=True,
+                        ):
+                            st.session_state.review_move_index -= 1
+                            st.rerun()
+
+                    with col3:
+                        if st.button(
+                            "Next →",
+                            disabled=move_index == len(move_records),
+                            use_container_width=True,
+                        ):
+                            st.session_state.review_move_index += 1
+                            st.rerun()
+
+                    with col4:
+                        if st.button(
+                            "Last ⏭",
+                            disabled=move_index == len(move_records),
+                            use_container_width=True,
+                        ):
+                            st.session_state.review_move_index = len(move_records)
+                            st.rerun()
+
+                else:
+                    st.error("Could not read this game's PGN.")
+
+            # ---------------- DISPLAY GAME RESULTS ----------------
 
             else:
 
-                for game in displayed_games:
+                st.subheader("Game Results")
 
-                    game_date = game["date"].replace(".", "-")
+                st.caption(
+                    f"{len(filtered_games)} matching games found. "
+                    f"Showing {len(displayed_games)}."
+                )
 
-                    with st.container(border=True):
+                if not displayed_games:
 
-                        col1, col2, col3 = st.columns([2, 1, 1])
+                    st.info("No games match your selected filters.")
 
-                        with col1:
-                            st.markdown(f"**vs {game['opponent']}**")
-                            st.caption(game_date)
+                else:
 
-                        with col2:
-                            st.write(game["format"])
+                    for index, game in enumerate(displayed_games):
 
-                        with col3:
-                            st.markdown(f"**{game['outcome']}**")
+                        game_date = game["date"].replace(".", "-")
 
+                        with st.container(border=True):
 
+                            col1, col2, col3 = st.columns([2, 1, 1])
+
+                            with col1:
+                                st.markdown(
+                                    f"**vs {game['opponent']}**"
+                                )
+                                st.caption(game_date)
+
+                            with col2:
+                                st.write(game["format"])
+
+                            with col3:
+                                st.markdown(f"**{game['outcome']}**")
+
+                            if st.button(
+                                "Review Game",
+                                key=f"review_game_{index}",
+                                use_container_width=True,
+                            ):
+                                st.session_state.selected_game = game
+                                st.rerun()
 
 # ---------------- STATISTICS PAGE ----------------
 

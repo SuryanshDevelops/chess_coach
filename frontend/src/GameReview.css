@@ -1,0 +1,98 @@
+
+.review-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(260px, 0.8fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.board-panel,
+.moves-panel {
+  background: #171e18;
+  border: 1px solid #29342b;
+  border-radius: 12px;
+  padding: 20px;
+}
+
+.board-header,
+.board-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.board-header {
+  margin-bottom: 18px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: #9aa69a;
+}
+
+.game-status {
+  color: #b7e1b9;
+  letter-spacing: 0;
+  font-size: 12px;
+}
+
+.chessboard-container {
+  width: 100%;
+  max-width: 620px;
+  margin: 0 auto;
+}
+
+.board-controls {
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.board-controls button {
+  flex: 1;
+  padding: 11px;
+  border: 1px solid #344d38;
+  border-radius: 7px;
+  background: #26372a;
+  color: #c9e4cb;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.board-controls button:hover {
+  background: #344b38;
+}
+
+.moves-panel {
+  min-height: 300px;
+}
+
+.moves-empty {
+  padding: 35px 10px;
+  text-align: center;
+  color: #879387;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.move-list {
+  margin-top: 18px;
+  max-height: 470px;
+  overflow-y: auto;
+}
+
+.move-row {
+  display: grid;
+  grid-template-columns: 35px 1fr 1fr;
+  gap: 10px;
+  padding: 11px 8px;
+  border-bottom: 1px solid #29342b;
+  font-size: 13px;
+}
+
+.move-number {
+  color: #7e8c7f;
+}
+
+@media (max-width: 850px) {
+  .review-layout {
+    grid-template-columns: 1fr;
+  }
+}
